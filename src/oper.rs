@@ -9,6 +9,7 @@
 use std::fmt;
 
 use crate::{Error, Result};
+use base64::encode;
 use bson::{Bson, Document};
 use chrono::{DateTime, TimeZone, Utc};
 use mongodb::bson;
@@ -19,7 +20,7 @@ pub enum Operation {
     /// A no-op as inserted periodically by MongoDB or used to initiate new replica sets.
     Noop {
         /// A unique identifier for this operation.
-        id: i64,
+        uid: String,
         /// The time of the operation.
         timestamp: DateTime<Utc>,
         /// The message associated with this operation.
@@ -28,7 +29,7 @@ pub enum Operation {
     /// An insert of a document into a specific database and collection.
     Insert {
         /// A unique identifier for this operation.
-        id: i64,
+        uid: String,
         /// The time of the operation.
         timestamp: DateTime<Utc>,
         /// The full namespace of the operation including its database and collection.
@@ -39,7 +40,7 @@ pub enum Operation {
     /// An update of a document in a specific database and collection matching a given query.
     Update {
         /// A unique identifier for this operation.
-        id: i64,
+        uid: String,
         /// The time of the operation.
         timestamp: DateTime<Utc>,
         /// The full namespace of the operation including its database and collection.
@@ -52,7 +53,7 @@ pub enum Operation {
     /// The deletion of a document in a specific database and collection matching a given query.
     Delete {
         /// A unique identifier for this operation.
-        id: i64,
+        uid: String,
         /// The time of the operation.
         timestamp: DateTime<Utc>,
         /// The full namespace of the operation including its database and collection.
@@ -63,7 +64,7 @@ pub enum Operation {
     /// A command such as the creation or deletion of a collection.
     Command {
         /// A unique identifier for this operation.
-        id: i64,
+        uid: String,
         /// The time of the operation.
         timestamp: DateTime<Utc>,
         /// The full namespace of the operation including its database and collection.
@@ -74,7 +75,7 @@ pub enum Operation {
     /// A command to apply multiple oplog operations at once.
     ApplyOps {
         /// A unique identifier for this operation.
-        id: i64,
+        uid: String,
         /// The time of the operation.
         timestamp: DateTime<Utc>,
         /// The full namespace of the operation including its database and collection.
@@ -134,7 +135,6 @@ impl Operation {
 
     /// Returns a no-op operation for a given document.
     fn from_noop(document: &Document) -> Result<Operation> {
-        let h = document.get_i64("h")?;
         let ts = document.get_timestamp("ts")?;
         // We don't always get a document in "o"
         let message = document
@@ -145,7 +145,7 @@ impl Operation {
             .map(|s| s.to_string());
 
         Ok(Operation::Noop {
-            id: h,
+            uid: get_uid(document).unwrap().to_string(),
             timestamp: timestamp_to_datetime(ts),
             message,
         })
@@ -153,13 +153,12 @@ impl Operation {
 
     /// Return an insert operation for a given document.
     fn from_insert(document: &Document) -> Result<Operation> {
-        let h = document.get_i64("h")?;
         let ts = document.get_timestamp("ts")?;
         let ns = document.get_str("ns")?;
         let o = document.get_document("o")?;
 
         Ok(Operation::Insert {
-            id: h,
+            uid: get_uid(document).unwrap().to_string(),
             timestamp: timestamp_to_datetime(ts),
             namespace: ns.into(),
             document: o.to_owned(),
@@ -168,14 +167,13 @@ impl Operation {
 
     /// Return an update operation for a given document.
     fn from_update(document: &Document) -> Result<Operation> {
-        let h = document.get_i64("h")?;
         let ts = document.get_timestamp("ts")?;
         let ns = document.get_str("ns")?;
         let o = document.get_document("o")?;
         let o2 = document.get_document("o2")?;
 
         Ok(Operation::Update {
-            id: h,
+            uid: get_uid(document).unwrap().to_string(),
             timestamp: timestamp_to_datetime(ts),
             namespace: ns.into(),
             query: o2.to_owned(),
@@ -185,13 +183,12 @@ impl Operation {
 
     /// Return a delete operation for a given document.
     fn from_delete(document: &Document) -> Result<Operation> {
-        let h = document.get_i64("h")?;
         let ts = document.get_timestamp("ts")?;
         let ns = document.get_str("ns")?;
         let o = document.get_document("o")?;
 
         Ok(Operation::Delete {
-            id: h,
+            uid: get_uid(document).unwrap().to_string(),
             timestamp: timestamp_to_datetime(ts),
             namespace: ns.into(),
             query: o.to_owned(),
@@ -203,7 +200,6 @@ impl Operation {
     /// Note that this can return either an `Operation::Command` or an `Operation::ApplyOps` when
     /// successful.
     fn from_command(document: &Document) -> Result<Operation> {
-        let h = document.get_i64("h")?;
         let ts = document.get_timestamp("ts")?;
         let ns = document.get_str("ns")?;
         let o = document.get_document("o")?;
@@ -216,14 +212,14 @@ impl Operation {
                     .collect::<Result<Vec<Operation>>>()?;
 
                 Ok(Operation::ApplyOps {
-                    id: h,
+                    uid: get_uid(document).unwrap().to_string(),
                     timestamp: timestamp_to_datetime(ts),
                     namespace: ns.into(),
                     operations: operations,
                 })
             }
             Err(_) => Ok(Operation::Command {
-                id: h,
+                uid: get_uid(document).unwrap().to_string(),
                 timestamp: timestamp_to_datetime(ts),
                 namespace: ns.into(),
                 command: o.to_owned(),
@@ -236,14 +232,14 @@ impl fmt::Display for Operation {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match *self {
             Operation::Noop {
-                id,
+                ref uid,
                 timestamp,
                 ref message,
             } => {
-                write!(f, "No-op #{} at {}: {:?}", id, timestamp, message)
+                write!(f, "No-op #{} at {}: {:?}", uid, timestamp, message)
             }
             Operation::Insert {
-                id,
+                ref uid,
                 timestamp,
                 ref namespace,
                 ref document,
@@ -251,11 +247,11 @@ impl fmt::Display for Operation {
                 write!(
                     f,
                     "Insert #{} into {} at {}: {}",
-                    id, namespace, timestamp, document
+                    uid, namespace, timestamp, document
                 )
             }
             Operation::Update {
-                id,
+                ref uid,
                 timestamp,
                 ref namespace,
                 ref query,
@@ -264,11 +260,11 @@ impl fmt::Display for Operation {
                 write!(
                     f,
                     "Update #{} {} with {} at {}: {}",
-                    id, namespace, query, timestamp, update
+                    uid, namespace, query, timestamp, update
                 )
             }
             Operation::Delete {
-                id,
+                ref uid,
                 timestamp,
                 ref namespace,
                 ref query,
@@ -276,11 +272,11 @@ impl fmt::Display for Operation {
                 write!(
                     f,
                     "Delete #{} from {} at {}: {}",
-                    id, namespace, timestamp, query
+                    uid, namespace, timestamp, query
                 )
             }
             Operation::Command {
-                id,
+                ref uid,
                 timestamp,
                 ref namespace,
                 ref command,
@@ -288,11 +284,11 @@ impl fmt::Display for Operation {
                 write!(
                     f,
                     "Command #{} {} at {}: {}",
-                    id, namespace, timestamp, command
+                    uid, namespace, timestamp, command
                 )
             }
             Operation::ApplyOps {
-                id,
+                ref uid,
                 timestamp,
                 ref namespace,
                 ref operations,
@@ -300,7 +296,7 @@ impl fmt::Display for Operation {
                 write!(
                     f,
                     "ApplyOps #{} {} at {}: {} operations",
-                    id,
+                    uid,
                     namespace,
                     timestamp,
                     operations.len()
@@ -316,6 +312,15 @@ fn timestamp_to_datetime(timestamp: bson::Timestamp) -> DateTime<Utc> {
     let nanoseconds = timestamp.increment;
 
     Utc.timestamp(seconds as i64, nanoseconds)
+}
+
+fn get_uid(document: &Document) -> Result<String> {
+    let lsid = document.get_document("lsid")?;
+    let bytes = lsid.get_binary_generic("uid")?;
+
+    let uid = encode(bytes);
+
+    Ok(uid)
 }
 
 #[cfg(test)]
@@ -343,7 +348,7 @@ mod tests {
         assert_eq!(
             operation,
             Operation::Noop {
-                id: -2135725856567446411i64,
+                uid: "2135725856567446411i64".to_string(),
                 timestamp: Utc.timestamp(1479419535, 0),
                 message: Some("initiating set".into()),
             }
@@ -370,7 +375,7 @@ mod tests {
         assert_eq!(
             operation,
             Operation::Insert {
-                id: -1742072865587022793i64,
+                uid: "1742072865587022793i64".to_string(),
                 timestamp: Utc.timestamp(1479561394, 0),
                 namespace: "foo.bar".into(),
                 document: doc! { "foo" : "bar" },
@@ -403,7 +408,7 @@ mod tests {
         assert_eq!(
             operation,
             Operation::Update {
-                id: 3511341713062188019i64,
+                uid: "3511341713062188019i64".to_string(),
                 timestamp: Utc.timestamp(1479561033, 0),
                 namespace: "foo.bar".into(),
                 query: doc! { "_id" : 1 },
@@ -432,7 +437,7 @@ mod tests {
         assert_eq!(
             operation,
             Operation::Delete {
-                id: -5457382347563537847i64,
+                uid: "5457382347563537847i64".to_string(),
                 timestamp: Utc.timestamp(1479421186, 0),
                 namespace: "foo.bar".into(),
                 query: doc! { "_id" : 1 },
@@ -460,7 +465,7 @@ mod tests {
         assert_eq!(
             operation,
             Operation::Command {
-                id: -7222343681970774929i64,
+                uid: "7222343681970774929i6".to_string(),
                 timestamp: Utc.timestamp(1479553955, 0),
                 namespace: "test.$cmd".into(),
                 command: doc! { "create" : "foo" },
@@ -527,11 +532,11 @@ mod tests {
         assert_eq!(
             operation,
             Operation::ApplyOps {
-                id: -3262249347345468996i64,
+                uid: "3262249347345468996i64".to_string(),
                 timestamp: Utc.timestamp(1483789052, 0),
                 namespace: "foo.$cmd".into(),
                 operations: vec![Operation::Insert {
-                    id: -1742072865587022793i64,
+                    uid: "1742072865587022793i64".to_string(),
                     timestamp: Utc.timestamp(1479561394, 0),
                     namespace: "foo.bar".into(),
                     document: doc! { "_id" : 1, "foo" : "bar" },
